@@ -1,0 +1,162 @@
+import asyncio, json, os
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import FileResponse
+from google import genai
+from google.genai import types
+
+load_dotenv()
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+TRANSLATE_MODEL = os.getenv("TRANSLATE_MODEL", "gemini-3.5-flash-lite")
+REPLY_MODEL = os.getenv("REPLY_MODEL", "gemini-3.5-flash-lite")
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gemini-3.5-transcribe-live")
+
+TRANSCRIBE_CONFIG = types.LiveConnectConfig(
+    response_modalities=["TEXT"],
+    input_audio_transcription=types.AudioTranscriptionConfig(
+        language_codes=["en-US"], mode="SMART"
+    ),
+)
+
+app = FastAPI()
+
+@app.get("/")
+async def index():
+    return FileResponse("index.html")
+
+TRANSLATE_PROMPT = (
+    "You are a live interpreter. Translate the English text into natural, "
+    "spoken Turkish. Output ONLY the Turkish translation, nothing else."
+)
+
+async def translate(ws, sid, text):
+    try:
+        stream = await client.aio.models.generate_content_stream(
+            model=TRANSLATE_MODEL,
+            contents=text,
+            config=types.GenerateContentConfig(
+                system_instruction=TRANSLATE_PROMPT, temperature=0.2
+            ),
+        )
+        full = ""
+        async for chunk in stream:
+            if chunk.text:
+                full += chunk.text
+                await ws.send_json({"type": "tr", "id": sid, "text": full})
+    except Exception as e:
+        await ws.send_json({"type": "error", "text": f"Çeviri hatası: {e}"})
+
+async def suggest(ws, sid, history, context):
+    try:
+        convo = "\n".join(f"- {h}" for h in history[-12:])
+        prompt = (
+            f"Situation: {context or 'general conversation'}\n"
+            f"The other person said (latest last):\n{convo}\n\n"
+            "Give exactly 3 different natural English replies that I could say "
+            "next. Each 1-2 short sentences. Vary them: one safe and direct, "
+            "one confident, one that asks a smart question back."
+        )
+        resp = await client.aio.models.generate_content(
+            model=REPLY_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=list[str],
+                temperature=0.8,
+            ),
+        )
+        replies = json.loads(resp.text)[:3]
+        await ws.send_json({"type": "replies", "id": sid, "replies": replies})
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        await ws.send_json({"type": "error", "text": f"Öneri hatası: {e}"})
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket):
+    await ws.accept()
+    st = {"sid": 0, "suggest": None, "mic": None}
+    history, context = [], ""
+    audio_q = asyncio.Queue(maxsize=200)
+
+    async def new_sentence(text):
+        text = text.strip()
+        if not text:
+            return
+        st["sid"] += 1
+        sid = st["sid"]
+        history.append(text)
+        if st["suggest"]:
+            st["suggest"].cancel()
+        await ws.send_json({"type": "en", "id": sid, "text": text})
+        asyncio.create_task(translate(ws, sid, text))
+        st["suggest"] = asyncio.create_task(suggest(ws, sid, history, context))
+
+    async def transcriber():
+        while True:
+            try:
+                async with client.aio.live.connect(
+                    model=TRANSCRIBE_MODEL, config=TRANSCRIBE_CONFIG
+                ) as session:
+                    async def pump():
+                        while True:
+                            chunk = await audio_q.get()
+                            await session.send_realtime_input(
+                                audio=types.Blob(
+                                    data=chunk, mime_type="audio/pcm;rate=16000"
+                                )
+                            )
+                    pump_task = asyncio.create_task(pump())
+                    try:
+                        while True:
+                            async for r in session.receive():
+                                sc = r.server_content
+                                if not sc:
+                                    continue
+                                it = sc.interim_input_transcription
+                                if it and it.text:
+                                    await ws.send_json({"type": "interim", "text": it.text})
+                                ft = sc.input_transcription
+                                if ft and ft.text:
+                                    await new_sentence(ft.text)
+                            await asyncio.sleep(0.05)
+                    finally:
+                        pump_task.cancel()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                try:
+                    await ws.send_json({"type": "error", "text": f"Transkript bağlantısı: {e}"})
+                except Exception:
+                    return
+                await asyncio.sleep(1)
+
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("bytes") is not None:
+                if audio_q.full():
+                    audio_q.get_nowait()
+                audio_q.put_nowait(msg["bytes"])
+                continue
+            data = json.loads(msg["text"])
+            kind = data.get("type")
+            if kind == "context":
+                context = data.get("text", "")
+            elif kind == "start":
+                if not st["mic"]:
+                    st["mic"] = asyncio.create_task(transcriber())
+            elif kind == "stop":
+                if st["mic"]:
+                    st["mic"].cancel()
+                    st["mic"] = None
+                while not audio_q.empty():
+                    audio_q.get_nowait()
+            elif kind == "text":
+                await new_sentence(data.get("text", ""))
+    finally:
+        for k in ("mic", "suggest"):
+            if st[k]:
+                st[k].cancel()

@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Interview Panel — Warm Monochrome Light</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,100..900;1,14..32,100..900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-canvas: #E5E0D8;
+            --bg-surface: #D4CEC4;
+            --ink-primary: #181715;
+            --ink-muted: #5C5852;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-canvas);
+            color: var(--ink-primary);
+            background-image: radial-gradient(rgba(24, 23, 21, 0.035) 1px, transparent 0);
+            background-size: 24px 24px;
+        }
+
+        .font-mono-tech { font-family: 'JetBrains Mono', monospace; }
+
+        #dot { background-color: var(--ink-muted); }
+        #dot.on { background-color: #000000; box-shadow: 0 0 8px rgba(0,0,0,0.3); }
+
+        #mic.live {
+            background-color: transparent !important;
+            color: var(--ink-primary) !important;
+        }
+        #mic.live span.pulse-dot {
+            background-color: #ef4444;
+            animation: pulse 1.4s infinite;
+        }
+        @keyframes pulse { 50% { opacity: 0.3; } }
+
+        .past-item { margin-bottom: 12px; font-size: 13px; color: var(--ink-muted); }
+        .past-item .t { color: var(--ink-primary); font-weight: 500; margin-top: 2px;}
+        
+        #en.interim { color: var(--ink-muted); font-style: italic; }
+        
+        .chip {
+            text-align: left;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            min-height: 135px;
+            cursor: pointer;
+            background-color: rgba(212, 206, 196, 0.6);
+            color: var(--ink-primary);
+            transition: none;
+        }
+        .chip:hover {
+            background-color: var(--ink-primary);
+            color: var(--bg-canvas);
+        }
+        .chip.ghost {
+            cursor: default;
+            color: var(--ink-muted);
+        }
+        .chip.ghost:hover {
+            background-color: rgba(212, 206, 196, 0.6);
+            color: var(--ink-muted);
+        }
+        .chip.copied {
+            background-color: var(--ink-primary);
+            color: var(--bg-canvas);
+            border: 2px solid var(--ink-primary);
+        }
+    </style>
+</head>
+<body class="h-screen w-full flex flex-col justify-between overflow-hidden p-6 md:px-12 md:py-8 selection:bg-[#181715] selection:text-[#E5E0D8]">
+
+    <header class="flex-none">
+        <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center gap-2.5">
+                <span id="dot" class="w-2 h-2 rounded-full inline-block transition-colors duration-300"></span>
+                <span class="text-[11px] font-bold tracking-[0.22em] uppercase text-[#181715]">
+                    System Context
+                </span>
+            </div>
+            <span class="text-[11px] font-mono-tech uppercase tracking-[0.15em] text-[#5C5852]">
+                Live Interview Panel
+            </span>
+        </div>
+        <textarea
+            id="ctx"
+            rows="3"
+            class="w-full bg-[#D4CEC4]/70 border border-[#181715]/30 focus:border-[#181715] focus:bg-[#D4CEC4] p-3.5 text-sm text-[#181715] placeholder:text-[#5C5852] focus:outline-none resize-none transition-colors leading-relaxed"
+            placeholder="Bağlam (isteğe bağlı): örn. Mobil oyun UA mülakatı, ben aday olarak katılıyorum"></textarea>
+    </header>
+
+    <main class="flex-1 min-h-0 flex flex-col justify-center gap-6 my-4 relative">
+        <div class="flex justify-center shrink-0">
+            <div class="inline-flex shadow-sm">
+                <button type="button" id="mic"
+                    class="h-12 px-10 bg-[#181715] text-[#E5E0D8] border border-[#181715] text-xs font-bold uppercase tracking-[0.22em] flex items-center justify-center gap-2.5 hover:bg-transparent hover:text-[#181715] transition-none cursor-pointer">
+                    <span class="pulse-dot w-2 h-2 rounded-full bg-[#E5E0D8]"></span>
+                    <span>Dinle</span>
+                </button>
+
+                <div class="relative h-12 border-y border-r border-[#181715] bg-[#D4CEC4]/50 hover:bg-[#181715] hover:text-[#E5E0D8] transition-none group flex items-center">
+                    <select id="src" aria-label="Mikrofon Seçimi"
+                        class="appearance-none bg-transparent h-full pl-8 pr-11 text-xs font-bold uppercase tracking-[0.22em] text-[#181715] group-hover:text-[#E5E0D8] focus:outline-none cursor-pointer">
+                        <option class="bg-[#E5E0D8] text-[#181715]" value="tab">Sekme Sesi</option>
+                        <option class="bg-[#E5E0D8] text-[#181715]" value="mic">Mikrofon</option>
+                    </select>
+                    <span class="pointer-events-none absolute right-4 text-[10px] text-[#181715] group-hover:text-[#E5E0D8]">
+                        ▼
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        <div id="past" class="absolute top-0 left-0 w-full opacity-50 max-h-[100px] overflow-y-auto pointer-events-none text-center font-mono-tech"></div>
+        
+        <div class="bg-[#D4CEC4] border border-[#181715] p-6 text-center flex flex-col justify-center min-h-[140px] shrink-0">
+            <h1 id="en" class="text-2xl md:text-3xl lg:text-4xl uppercase tracking-tight leading-snug text-[#181715] mb-2 font-black">
+                Dinlemeyi başlat veya aşağıya bir cümle yaz…
+            </h1>
+            <p id="tr" class="text-sm md:text-base font-mono-tech text-[#5C5852] min-h-[24px]"></p>
+        </div>
+        
+        <div id="err" class="text-[#ef4444] text-[13px] text-center font-mono-tech empty:hidden"></div>
+
+        <div id="replies" class="grid grid-cols-1 md:grid-cols-3 gap-0 border border-[#181715] shrink-0"></div>
+    </main>
+
+    <footer class="flex-none pt-3 border-t border-[#181715]">
+        <form id="form" class="flex items-stretch h-11 border border-[#181715] bg-[#D4CEC4]/50 p-0 m-0">
+            <input
+                id="inp"
+                autocomplete="off"
+                type="text"
+                class="flex-1 bg-transparent px-4 text-sm text-[#181715] placeholder:text-[#5C5852] focus:outline-none focus:bg-[#D4CEC4] font-mono-tech"
+                placeholder="İstersen elle de yazabilirsin, Enter'a bas"
+            />
+            <button
+                type="submit"
+                class="send px-8 bg-[#181715] text-[#E5E0D8] text-xs font-bold uppercase tracking-[0.22em] hover:bg-[#E5E0D8] hover:text-[#181715] border-l border-[#181715] transition-none shrink-0 cursor-pointer">
+                Gönder
+            </button>
+        </form>
+    </footer>
+
+<script>
+const $ = id => document.getElementById(id);
+let ws, cur = 0, interimMode = false;
+let cardElements = [];
+
+// Kart iskeletlerini tek seferde oluştur (Zero DOM Thrashing)
+function initCards(isLoading = false) {
+    const container = $("replies");
+    container.innerHTML = "";
+    cardElements = [];
+    for (let i = 0; i < 3; i++) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = `chip ${isLoading ? 'ghost' : ''} md:${i < 2 ? 'border-r' : ''} border-b md:border-b-0 border-[#181715] group`;
+        b.innerHTML = `
+            <div class="flex items-center justify-between w-full mb-3">
+                <span class="card-title text-[10px] font-mono-tech uppercase tracking-[0.22em] opacity-60 group-hover:opacity-80">
+                    ${isLoading ? `Loading // 0${i+1}` : `Option 0${i+1}`}
+                </span>
+                <span class="copy-badge text-[10px] font-mono-tech uppercase tracking-[0.15em] border border-current px-1.5 py-0.5 opacity-0 ${isLoading ? '' : 'group-hover:opacity-100'}">Copy ↵</span>
+            </div>
+            <p class="card-body text-xs md:text-sm leading-relaxed font-medium">${isLoading ? 'Öneriler hazırlanıyor…' : '—'}</p>
+        `;
+        b.onclick = () => {
+            const txt = b.querySelector('.card-body').textContent;
+            if (!txt || txt === 'Öneriler hazırlanıyor…' || txt === '—') return;
+            navigator.clipboard.writeText(txt);
+            cardElements.forEach(el => el.classList.remove('copied'));
+            b.classList.add("copied");
+        };
+        container.appendChild(b);
+        cardElements.push(b);
+    }
+}
+initCards(false);
+
+function pushPast() {
+  const tr = $("tr").textContent;
+  if (!tr || tr === "…" || interimMode) return;
+  const p = document.createElement("div");
+  p.className = "past-item";
+  p.innerHTML = "<div class='en-past'></div><div class='t'></div>";
+  p.children[0].textContent = $("en").textContent;
+  p.children[1].textContent = tr;
+  $("past").appendChild(p);
+  $("past").scrollTop = $("past").scrollHeight;
+}
+
+function connect() {
+  ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onopen = () => { 
+      $("dot").classList.add("on"); 
+      const c = localStorage.getItem("ctx") || ""; 
+      $("ctx").value = c; 
+      if (c) ws.send(JSON.stringify({ type: "context", text: c })); 
+  };
+  ws.onclose = () => { 
+      $("dot").classList.remove("on"); 
+      stopMic(false); 
+      setTimeout(connect, 1000); 
+  };
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === "interim") {
+      if (!interimMode) { pushPast(); interimMode = true; $("tr").textContent = ""; }
+      $("en").textContent = m.text;
+      $("en").classList.add("interim");
+    } else if (m.type === "en") {
+      pushPast();
+      interimMode = false;
+      cur = m.id;
+      $("en").classList.remove("interim");
+      $("en").textContent = m.text;
+      $("tr").textContent = "…";
+      $("err").textContent = "";
+      initCards(true);
+    } else if (m.type === "tr" && m.id === cur) {
+      $("tr").textContent = m.text;
+    } else if ((m.type === "replies_stream" || m.type === "replies") && m.id === cur) {
+      requestAnimationFrame(() => {
+        m.replies.forEach((r, idx) => {
+          if (!cardElements[idx] || !r) return;
+          const card = cardElements[idx];
+          card.classList.remove("ghost");
+          card.querySelector(".card-title").textContent = `Option 0${idx+1}`;
+          card.querySelector(".copy-badge").classList.add("group-hover:opacity-100");
+          card.querySelector(".card-body").textContent = r;
+        });
+      });
+    } else if (m.type === "error") {
+      $("err").textContent = m.text;
+    }
+  };
+}
+connect();
+
+/* ---- Ses yakalama: 16 kHz PCM, 100 ms'lik parçalar ---- */
+const workletCode = `
+class PCM extends AudioWorkletProcessor {
+  constructor() { super(); this.ratio = sampleRate / 16000; this.phase = 0; this.acc = 0; this.cnt = 0;
+                  this.out = new Int16Array(1600); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      this.acc += ch[i]; this.cnt++; this.phase += 1;
+      if (this.phase >= this.ratio) {
+        this.phase -= this.ratio;
+        const v = Math.max(-1, Math.min(1, this.acc / this.cnt));
+        this.out[this.n++] = v < 0 ? v * 32768 : v * 32767;
+        this.acc = 0; this.cnt = 0;
+        if (this.n === 1600) {
+          this.port.postMessage(this.out.buffer.slice(0));
+          this.n = 0;
+        }
+      }
+    }
+    return true;
+  }
+}
+registerProcessor("pcm", PCM);`;
+
+let actx = null, stream = null, listening = false;
+
+async function startMic() {
+  try {
+    if ($("src").value === "tab") {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+      });
+    } else {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 }
+      });
+    }
+
+    const audioTracks = stream.getAudioTracks();
+    if (!audioTracks.length) {
+      stream.getTracks().forEach(t => t.stop());
+      throw new Error("Ses paylaşılmadı! Sekme seçerken sol alttaki 'Sekme sesini de paylaş' (Share tab audio) kutusunu işaretle.");
+    }
+
+    // Sekme paylaşımı tarayıcıdan durdurulursa UI'ı sıfırla
+    audioTracks[0].onended = () => stopMic(true);
+
+    actx = new AudioContext();
+    if (actx.state === "suspended") await actx.resume();
+
+    await actx.audioWorklet.addModule(URL.createObjectURL(new Blob([workletCode], { type: "application/javascript" })));
+    const src = actx.createMediaStreamSource(new MediaStream([audioTracks[0]]));
+    const node = new AudioWorkletNode(actx, "pcm");
+    const mute = actx.createGain();
+    mute.gain.value = 0;
+
+    node.port.onmessage = e => {
+      if (ws && ws.readyState === 1) ws.send(e.data);
+    };
+
+    src.connect(node);
+    node.connect(mute);
+    mute.connect(actx.destination);
+
+    ws.send(JSON.stringify({ type: "start" }));
+    listening = true;
+    
+    $("mic").classList.add("live");
+    $("mic").querySelector('span:last-child').textContent = "Durdur";
+    $("err").textContent = "";
+  } catch (e) {
+    $("err").textContent = "Ses hatası: " + e.message;
+    stopMic(false);
+  }
+}
+
+function stopMic(notify = true) {
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  if (actx) actx.close();
+  stream = null; actx = null;
+  if (notify && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "stop" }));
+  listening = false;
+  
+  $("mic").classList.remove("live");
+  $("mic").querySelector('span:last-child').textContent = "Dinle";
+}
+
+$("mic").onclick = () => listening ? stopMic() : startMic();
+
+$("form").onsubmit = e => {
+  e.preventDefault();
+  const t = $("inp").value.trim();
+  if (!t || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: "text", text: t }));
+  $("
+sed -i '' '/_MODEL=/d' /Users/atelier/interview-panel/.env
+lsof -ti:8001 | xargs kill -9 2>/dev/null
+cd /Users/atelier/interview-panel && source .venv/bin/activate && uvicorn main:app --port 8001
+cat << 'EOF' > /Users/atelier/interview-panel/main.py
+import asyncio, json, os
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import FileResponse
+from google import genai
+from google.genai import types
+
+load_dotenv()
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+TRANSLATE_MODEL = os.getenv("TRANSLATE_MODEL", "gemini-2.5-flash-lite")
+REPLY_MODEL = os.getenv("REPLY_MODEL", "gemini-2.5-flash-lite")
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gemini-2.0-flash-live-001")
+
+TRANSCRIBE_CONFIG = types.LiveConnectConfig(
+    response_modalities=["TEXT"],
+    input_audio_transcription=types.AudioTranscriptionConfig(),
+)
+
+app = FastAPI()
+
+@app.get("/")
+async def index():
+    return FileResponse(
+        "index.html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
+    )
+
+TRANSLATE_PROMPT = (
+    "Live interpreter. Translate the English input into natural spoken Turkish. "
+    "Output ONLY the Turkish translation, nothing else."
+)
+
+def make_gen_config(sys_inst=None, temp=0.2, max_tokens=200):
+    kwargs = {"temperature": temp, "max_output_tokens": max_tokens}
+    if sys_inst:
+        kwargs["system_instruction"] = sys_inst
+    try:
+        kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        return types.GenerateContentConfig(**kwargs)
+    except Exception:
+        kwargs.pop("thinking_config", None)
+        return types.GenerateContentConfig(**kwargs)
+
+FAST_TRANSLATE_CONFIG = make_gen_config(sys_inst=TRANSLATE_PROMPT, temp=0.1, max_tokens=150)
+FAST_REPLY_CONFIG = make_gen_config(temp=0.3, max_tokens=220)
+
+async def translate(ws: WebSocket, sid: int, text: str):
+    try:
+        stream = await client.aio.models.generate_content_stream(
+            model=TRANSLATE_MODEL,
+            contents=text,
+            config=FAST_TRANSLATE_CONFIG,
+        )
+        full = ""
+        async for chunk in stream:
+            if chunk.text:
+                full += chunk.text
+                await ws.send_json({"type": "tr", "id": sid, "text": full})
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        await ws.send_json({"type": "error", "text": f"Çeviri hatası: {e}"})
+
+async def suggest(ws: WebSocket, sid: int, history: list[str], context: str):
+    try:
+        convo = "\n".join(f"- {h}" for h in history[-6:])
+        prompt = (
+            "You are my real-time interview coach. I am the candidate speaking.\n"
+            f"MY BACKGROUND/CONTEXT: {context or 'Senior UA & Growth Marketing Specialist'}\n"
+            f"RECENT CONVERSATION (latest last):\n{convo}\n\n"
+            "Write exactly 3 distinct replies I can say next in first person.\n"
+            "CRITICAL FORMAT RULE: Separate the 3 replies strictly with '|||'. Do NOT use JSON, numbering, or bullet points.\n"
+            "Angle 1: Direct & concise metric/execution focus. ||| "
+            "Angle 2: Concrete example from my background. ||| "
+            "Angle 3: Strategic insight + sharp follow-up question.\n"
+            "Keep each reply to 1-2 natural spoken English sentences."
+        )
+        stream = await client.aio.models.generate_content_stream(
+            model=REPLY_MODEL,
+            contents=prompt,
+            config=FAST_REPLY_CONFIG,
+        )
+        full = ""
+        async for chunk in stream:
+            if chunk.text:
+                full += chunk.text
+                parts = [p.strip() for p in full.split("|||")]
+                await ws.send_json({"type": "replies_stream", "id": sid, "replies": parts[:3]})
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        await ws.send_json({"type": "error", "text": f"Öneri hatası: {e}"})
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket):
+    await ws.accept()
+    st = {"sid": 0, "suggest": None, "translate": None, "mic": None, "n": 0}
+    history, context = [], ""
+    audio_q = asyncio.Queue(maxsize=300)
+
+    async def new_sentence(text: str):
+        text = text.strip()
+        if not text:
+            return
+        st["sid"] += 1
+        sid = st["sid"]
+        history.append(text)
+
+        for task_key in ("suggest", "translate"):
+            if st[task_key] and not st[task_key].done():
+                st[task_key].cancel()
+
+        await ws.send_json({"type": "en", "id": sid, "text": text})
+        st["translate"] = asyncio.create_task(translate(ws, sid, text))
+        st["suggest"] = asyncio.create_task(suggest(ws, sid, history, context))
+
+    async def transcriber():
+        buf = ""
+        while True:
+            try:
+                async with client.aio.live.connect(
+                    model=TRANSCRIBE_MODEL, config=TRANSCRIBE_CONFIG
+                ) as session:
+                    print("LIVE API BAGLANDI:", TRANSCRIBE_MODEL, flush=True)
+                    async def pump():
+                        while True:
+                            chunk = await audio_q.get()
+                            await session.send_realtime_input(
+                                audio=types.Blob(
+                                    data=chunk, mime_type="audio/pcm;rate=16000"
+                                )
+                            )
+                    pump_task = asyncio.create_task(pump())
+                    try:
+                        async for r in session.receive():
+                            sc = r.server_content
+                            if not sc:
+                                continue
+                            it = getattr(sc, "interim_input_transcription", None)
+                            if it and it.text:
+                                await ws.send_json({"type": "interim", "text": buf + it.text})
+                            ft = getattr(sc, "input_transcription", None)
+                            if ft and ft.text:
+                                buf += ft.text
+                                await ws.send_json({"type": "interim", "text": buf})
+                                if any(buf.rstrip().endswith(p) for p in (".", "?", "!")) or len(buf.split()) >= 12:
+                                    await new_sentence(buf)
+                                    buf = ""
+                            if getattr(sc, "turn_complete", False) and buf.strip():
+                                await new_sentence(buf)
+                                buf = ""
+                    finally:
+                        pump_task.cancel()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print("TRANSKRIPT HATASI:", repr(e), flush=True)
+                try:
+                    await ws.send_json({"type": "error", "text": f"Transkript hatası ({TRANSCRIBE_MODEL}): {e}"})
+                except Exception:
+                    return
+                await asyncio.sleep(2)
+
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("bytes") is not None:
+                if audio_q.full():
+                    try:
+                        audio_q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                audio_q.put_nowait(msg["bytes"])
+                st["n"] += 1
+                if st["n"] % 50 == 1:
+                    print(f"Ses paketi alindi: #{st['n']} ({len(msg['bytes'])} bytes)", flush=True)
+                continue
+            if msg.get("text"):
+                data = json.loads(msg["text"])
+                kind = data.get("type")
+                if kind == "context":
+                    context = data.get("text", "")
+                elif kind == "start":
+                    print("START sinyali alindi, transcriber baslatiliyor...", flush=True)
+                    while not audio_q.empty():
+                        audio_q.get_nowait()
+                    if not st["mic"] or st["mic"].done():
+                        st["mic"] = asyncio.create_task(transcriber())
+                elif kind == "stop":
+                    print("STOP sinyali alindi.", flush=True)
+                    if st["mic"]:
+                        st["mic"].cancel()
+                        st["mic"] = None
+                    while not audio_q.empty():
+                        audio_q.get_nowait()
+                elif kind == "text":
+                    await new_sentence(data.get("text", ""))
+    finally:
+        for k in ("mic", "suggest", "translate"):
+            if st[k]:
+                st[k].cancel()

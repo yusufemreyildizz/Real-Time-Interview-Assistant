@@ -1,0 +1,206 @@
+import asyncio, json, os
+from dotenv import load_dotenv
+from fastapi import FastAPI, WebSocket
+from fastapi.responses import FileResponse
+from google import genai
+from google.genai import types
+
+load_dotenv()
+client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+
+TRANSLATE_MODEL = os.getenv("TRANSLATE_MODEL", "gemini-3.5-flash-lite")
+REPLY_MODEL = os.getenv("REPLY_MODEL", "gemini-3.5-flash-lite")
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gemini-3.5-transcribe-live")
+
+TRANSCRIBE_CONFIG = types.LiveConnectConfig(
+    response_modalities=["TEXT"],
+    input_audio_transcription=types.AudioTranscriptionConfig(language_codes=["en-US"], mode="SMART"),
+)
+
+app = FastAPI()
+
+@app.get("/")
+async def index():
+    return FileResponse(
+        "index.html",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
+    )
+
+TRANSLATE_PROMPT = (
+    "You are a live subtitle translator. The English text is what ANOTHER person just said to the user. "
+    "Translate it faithfully into natural spoken Turkish, keeping the speaker's point of view. "
+    "Never answer it and never reply as the user. Output ONLY the Turkish translation."
+)
+
+def make_gen_config(sys_inst=None, temp=0.2, max_tokens=200):
+    kwargs = {"temperature": temp, "max_output_tokens": max_tokens}
+    if sys_inst:
+        kwargs["system_instruction"] = sys_inst
+    try:
+        kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        return types.GenerateContentConfig(**kwargs)
+    except Exception:
+        kwargs.pop("thinking_config", None)
+        return types.GenerateContentConfig(**kwargs)
+
+FAST_TRANSLATE_CONFIG = types.GenerateContentConfig(system_instruction=TRANSLATE_PROMPT, max_output_tokens=400)
+FAST_REPLY_CONFIG = types.GenerateContentConfig(max_output_tokens=1024)
+
+async def translate(ws: WebSocket, sid: int, text: str):
+    try:
+        stream = await client.aio.models.generate_content_stream(
+            model=TRANSLATE_MODEL,
+            contents=text,
+            config=FAST_TRANSLATE_CONFIG,
+        )
+        full = ""
+        async for chunk in stream:
+            if chunk.text:
+                full += chunk.text
+                await ws.send_json({"type": "tr", "id": sid, "text": full})
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        await ws.send_json({"type": "error", "text": f"Çeviri hatası: {e}"})
+
+async def suggest(ws: WebSocket, sid: int, history: list[str], context: str):
+    try:
+        convo = "\n".join(f"- {h}" for h in history[-6:])
+        prompt = (
+            "You are my real-time interview coach. I am the candidate speaking.\n"
+            f"MY BACKGROUND/CONTEXT: {context or 'Senior UA & Growth Marketing Specialist'}\n"
+            f"RECENT CONVERSATION (latest last):\n{convo}\n\n"
+            "Write exactly 3 distinct replies I can say next in first person.\n"
+            "CRITICAL FORMAT RULE: Separate the 3 replies strictly with '|||'. Do NOT use JSON, numbering, or bullet points.\n"
+            "Angle 1: Direct & concise metric/execution focus. ||| "
+            "Angle 2: Concrete example from my background. ||| "
+            "Angle 3: Strategic insight + sharp follow-up question.\n"
+            "Base every claim ONLY on my background above. Never invent employers, numbers, tools or achievements that are not written there; if a fact is missing, answer honestly in general terms or ask a sharp question back.\n"
+            "Keep each reply to 1-2 natural spoken English sentences."
+        )
+        stream = await client.aio.models.generate_content_stream(
+            model=REPLY_MODEL,
+            contents=prompt,
+            config=FAST_REPLY_CONFIG,
+        )
+        full = ""
+        async for chunk in stream:
+            if chunk.text:
+                full += chunk.text
+                parts = [p.strip() for p in full.split("|||")]
+                await ws.send_json({"type": "replies_stream", "id": sid, "replies": parts[:3]})
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        await ws.send_json({"type": "error", "text": f"Öneri hatası: {e}"})
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket):
+    await ws.accept()
+    st = {"sid": 0, "suggest": None, "translate": None, "mic": None, "n": 0}
+    history, context = [], ""
+    audio_q = asyncio.Queue(maxsize=300)
+
+    async def new_sentence(text: str):
+        text = text.strip()
+        if not text:
+            return
+        st["sid"] += 1
+        sid = st["sid"]
+        history.append(text)
+
+        for task_key in ("suggest", "translate"):
+            if st[task_key] and not st[task_key].done():
+                st[task_key].cancel()
+
+        await ws.send_json({"type": "en", "id": sid, "text": text})
+        st["translate"] = asyncio.create_task(translate(ws, sid, text))
+        st["suggest"] = asyncio.create_task(suggest(ws, sid, history, context))
+
+    async def transcriber():
+        buf = ""
+        while True:
+            try:
+                async with client.aio.live.connect(
+                    model=TRANSCRIBE_MODEL, config=TRANSCRIBE_CONFIG
+                ) as session:
+                    print("LIVE API BAGLANDI:", TRANSCRIBE_MODEL, flush=True)
+                    async def pump():
+                        while True:
+                            chunk = await audio_q.get()
+                            await session.send_realtime_input(
+                                audio=types.Blob(
+                                    data=chunk, mime_type="audio/pcm;rate=16000"
+                                )
+                            )
+                    pump_task = asyncio.create_task(pump())
+                    try:
+                        async for r in session.receive():
+                            sc = r.server_content
+                            if not sc:
+                                continue
+                            it = getattr(sc, "interim_input_transcription", None)
+                            if it and it.text:
+                                await ws.send_json({"type": "interim", "text": buf + it.text})
+                            ft = getattr(sc, "input_transcription", None)
+                            if ft and ft.text:
+                                buf += ft.text
+                                await ws.send_json({"type": "interim", "text": buf})
+                                if any(buf.rstrip().endswith(p) for p in (".", "?", "!")) or len(buf.split()) >= 12:
+                                    await new_sentence(buf)
+                                    buf = ""
+                            if getattr(sc, "turn_complete", False) and buf.strip():
+                                await new_sentence(buf)
+                                buf = ""
+                    finally:
+                        pump_task.cancel()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                print("TRANSKRIPT HATASI:", repr(e), flush=True)
+                try:
+                    await ws.send_json({"type": "error", "text": f"Transkript hatası ({TRANSCRIBE_MODEL}): {e}"})
+                except Exception:
+                    return
+                await asyncio.sleep(2)
+
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("bytes") is not None:
+                if audio_q.full():
+                    try:
+                        audio_q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                audio_q.put_nowait(msg["bytes"])
+                st["n"] += 1
+                if st["n"] % 50 == 1:
+                    print(f"Ses paketi alindi: #{st['n']}", flush=True)
+                continue
+            if msg.get("text"):
+                data = json.loads(msg["text"])
+                kind = data.get("type")
+                if kind == "context":
+                    context = data.get("text", "")
+                elif kind == "start":
+                    print("START sinyali alindi, transcriber baslatiliyor...", flush=True)
+                    while not audio_q.empty():
+                        audio_q.get_nowait()
+                    if not st["mic"] or st["mic"].done():
+                        st["mic"] = asyncio.create_task(transcriber())
+                elif kind == "stop":
+                    print("STOP sinyali alindi.", flush=True)
+                    if st["mic"]:
+                        st["mic"].cancel()
+                        st["mic"] = None
+                    while not audio_q.empty():
+                        audio_q.get_nowait()
+                elif kind == "text":
+                    await new_sentence(data.get("text", ""))
+    finally:
+        for k in ("mic", "suggest", "translate"):
+            if st[k]:
+                st[k].cancel()
